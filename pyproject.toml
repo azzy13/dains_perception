@@ -1,36 +1,144 @@
 [build-system]
-# We still use setuptools as the backend because of the CUDA extensions
-requires = ["setuptools>=82.0.1,<83", "wheel", "setuptools_scm"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "groundingdino"
+name = "dains_perception"
 version = "0.1.0"
-description = "open-set object detector"
+description = "Selective multi-object tracking with open-vocabulary detection"
 authors = [
-    {name = "Shilong Liu", email = "shilongliu.cv@gmail.com"},
-    {name = "International Digital Economy Academy"}
+    {name = "Fred Eisele", email = "fred.eisele@vanderbilt.edu"},
+    {name = "Di Yao", email = "di.yao@vanderbilt.edu"},
+    {name = "Azhar Hasan", email = "azhar.hasan@vanderbilt.edu"},
 ]
 license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.10"
-# These match your requirements.txt logic
-dependencies = [
-    "torch>=2.1.0",
+
+# Dependencies are managed by pixi below.
+dependencies = []
+
+[project.optional-dependencies]
+docker = [
+    "torch<=2.1.2",
     "torchvision",
-    "numpy",
+    "numpy==1.26.2",
+    # Kept pinned for the ROS Docker image.
+    "setuptools==78.1.1",
+    "transformers==4.49.0",
+    "supervision>=0.22.0",
     "opencv-python",
-    "supervision",
-    "pycocotools",
-    "transformers",
+    "timm",
+    "accelerate",
+    "einops",
     "addict",
     "yapf",
-    "timm"
+    "pycocotools",
+    "cython_bbox",
+    "lap",
+    # PyPI `clip` is not OpenAI CLIP.
+    "clip @ git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6",
+    "pandas",
+    "motmetrics",
+    "ipykernel",
 ]
 
-[tool.setuptools]
-packages = {find = {exclude = ["configs", "tests"]}}
+[tool.hatch.metadata]
+# Needed for the CLIP git dependency above.
+allow-direct-references = true
 
-[tool.setuptools.exclude-package-data]
-"*" = ["configs*", "tests*"]
+[tool.hatch.build.targets.wheel]
+packages = ["eval", "tracker", "utils", "helper"]
 
+[tool.pixi.workspace]
+authors = ["Di Yao <di.yao@vanderbilt.edu>"]
+# Avoid mixing PyTorch builds from different channels.
+channels = ["conda-forge"]
+name = "dains_perception"
+version = "0.1.0"
+
+# groundingdino-py-cuda requires CUDA 12.9+.
+platforms = [{ platform = "linux-64", linux = "5.15", cuda = "12.9" }]
+
+[tool.pixi.pypi-dependencies]
+dains_perception = { path = ".", editable = true }
+cython_bbox = "*"
+# Same CLIP revision as the Docker extra.
+clip = { git = "https://github.com/openai/CLIP.git", rev = "d05afc436d78f1c48dc0dbf8e5980a9d471f35f6" }
+
+[tool.pixi.dependencies]
+pip = ">=26.0.1,<27"
+
+groundingdino-py = ">=0.4.2"
+# Remove this on CPU-only systems.
+groundingdino-py-cuda = ">=0.4.2"
+
+pytorch = ">=2.1.0"
+torchvision = "*"
+
+numpy = ">=1.26.2"
+opencv = "*"
+timm = "*"
+# Pinned to version due to v5 drops the device argument bertwarper.py passes.
+transformers = "==4.49.0"
+supervision = ">=0.22.0"
+ipykernel = "*"
+lap = "*"
+pandas = "*"
+motmetrics = "*"
+accelerate = "*"
+einops = "*"
+addict = "*"
+yapf = "*"
+pycocotools = "*"
+
+[tool.pixi.feature.py310.dependencies]
+python = "3.10.*"
+
+[tool.pixi.feature.ros]
+channels = ["robostack-humble", "conda-forge"]
+
+[tool.pixi.feature.ros.dependencies]
+# Required by the RoboStack Humble environment.
+python = "3.12.*"
+
+ros-humble-rclpy = "*"
+ros-humble-cv-bridge = "*"
+ros-humble-sensor-msgs = "*"
+ros-humble-std-msgs = "*"
+ros-humble-geometry-msgs = "*"
+
+# Must match RMW_IMPLEMENTATION in docker-compose.
+ros-humble-rmw-cyclonedds-cpp = "*"
+
+# RoboStack does not pull in the ros2 CLI by default.
+ros-humble-ros2cli-common-extensions = "*"
+
+ros-humble-ament-cmake = "*"
+ros-humble-ament-cmake-python = "*"
+ros-humble-rosidl-default-generators = "*"
+ros-humble-rosidl-default-runtime = "*"
+ros-humble-ros-workspace = "*"
+colcon-common-extensions = "*"
+cmake = "*"
+ninja = "*"
+pkg-config = "*"
+
+[tool.pixi.environments]
+default = ["py310"]
+ros = ["ros"]
+
+[tool.pixi.tasks.demo]
+cmd = "python3 demo/inference_w_worker.py --video ../videos/carla1.mp4 --output ../output_2/annotated.mp4 --text-prompt \"red car.\" --fp16"
+description = "Run inference on a sample CARLA video with the 'red car' prompt"
+
+[tool.pixi.tasks.cuda-check]
+cmd = "python3 scripts/cuda-check.py"
+description = "Verify CUDA availability and print GPU/driver info"
+
+[tool.pixi.tasks.nuclear]
+cmd = "bash scripts/nu-clear.sh"
+description = "Remove all build artifacts and caches for a clean slate"
+
+# Conda build:
+# rattler-build build --recipe recipe.yaml --channel conda-forge

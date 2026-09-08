@@ -25,10 +25,8 @@ cd ..
 ./docker/build_ros2.sh
 ```
 
-Self-contained — the `perception_msgs` message definitions the node publishes
-live at `ros2_package/perception_msgs` and are staged into the Docker context
-by the build
-script, so no external checkout is needed.
+The `perception_msgs` definitions are included under
+`ros2_package/perception_msgs`, so no separate checkout is required.
 
 ### 3. Run GroundingDINO Node
 
@@ -76,7 +74,7 @@ docker run --rm --gpus all \
     --depth
 ```
 
-Output video lands in `outputs/` on your host. Change `--text-prompt` (default: `"red car."`) to detect different objects.
+Output video is written to `outputs/` on the host. Change `--text-prompt` (default: `"red car."`) to detect different objects.
 
 ### 6. Test with Sample Video (ROS2 — In Another Terminal)
 
@@ -86,22 +84,26 @@ docker run -d \
   --network host \
   --ipc=host \
   -e ROS_DOMAIN_ID=0 \
-  -v /isis/home/hasana3/vlmtest/GroundingDINO:/app/groundingdino:ro \
+  -v ${PWD}/videos:/app/GroundingDINO/videos:ro \
   groundingdino_ros:latest \
-  bash -c "cd /app/groundingdino/ros2_package && \
-           python3 test_publisher.py --video /app/groundingdino/videos/carla1.mp4 --fps 30"
+  bash -c "cd /app/GroundingDINO/ros2_package && \
+           python3 test_publisher.py --video /app/GroundingDINO/videos/carla1.mp4 --fps 30"
 ```
 
 ### 7. Verify It's Working
 
 ```bash
-# Check topics are publishing
+# Opens an interactive login shell inside the already-running test_publisher container
+docker exec -it test_publisher bash -l
+
+# List topics
 ros2 topic list | grep groundingdino
 
-# See detections
-ros2 topic echo /groundingdino/tracks --once
+# Inspect one detection message
+ros2 topic echo /perception/detections --once
+ros2 topic echo /perception/perceptions --once
 
-# Check FPS
+# Check FPS (publish rate)
 ros2 topic hz /groundingdino/visualization
 ```
 
@@ -111,7 +113,7 @@ ros2 topic hz /groundingdino/visualization
 
 ## Clean Up
 
-When you're done testing:
+Stop the containers:
 
 ```bash
 # Stop containers
@@ -134,7 +136,7 @@ GroundingDINO/
 │   └── tracking.mp4                  ← Video output
 └── ros2_package/
     ├── groundingdino_ros/
-    └── perception_msgs/              ← Message definitions
+    └── perception_msgs/                 ← msg definitions
 ```
 
 
