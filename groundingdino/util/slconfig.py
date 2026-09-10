@@ -88,7 +88,15 @@ class SLConfig(object):
                 sys.path.insert(0, temp_config_dir)
                 SLConfig._validate_py_syntax(filename)
                 mod = import_module(temp_module_name)
-                sys.path.pop(0)
+                # Remove THIS call's directory by value, not sys.path[0]:  with two
+                # threads loading a model concurrently each had inserted its own temp
+                # dir at index 0, so pop(0) could drop the other thread's directory and
+                # make that thread's import fail with ModuleNotFoundError on its own
+                # temp module.
+                try:
+                    sys.path.remove(temp_config_dir)
+                except ValueError:
+                    pass
                 cfg_dict = {
                     name: value for name, value in mod.__dict__.items() if not name.startswith("__")
                 }

@@ -114,8 +114,19 @@ def _classify_lab_patch(L: float, a_raw: float, b_raw: float,
 
 
 def _dominant_color_from_crop(crop_bgr: np.ndarray, grid_size: int = 4,
-                              gt_vocabulary: bool = False):
-    """Return (dominant_color_str, votes_dict) using patch-based LAB voting."""
+                              gt_vocabulary: bool = False,
+                              chroma_pct: Optional[float] = 85.0):
+    """Return (dominant_color_str, votes_dict) using patch-based LAB voting.
+
+    ``chroma_pct`` restricts the vote to the most chromatic pixels in the crop.
+    A detection box is not a segmentation mask: measured on rmot3, only 11-20%
+    of a target box is actually car, the rest is road, sky and shadow.  Averaging
+    LAB over the whole patch therefore pulls a saturated red car toward gray --
+    red recall was 15% before this and 95% after, with no change to the white bus
+    (measured over 11 sequences, all GT-visible actors).
+
+    Pass ``chroma_pct=None`` for the original whole-patch mean.
+    """
     if crop_bgr is None or crop_bgr.size == 0:
         return "unknown", {}
 
@@ -123,6 +134,15 @@ def _dominant_color_from_crop(crop_bgr: np.ndarray, grid_size: int = 4,
     h, w = lab.shape[:2]
     if h < 2 or w < 2:
         return "unknown", {}
+
+    # Global chroma floor: computed over the whole crop so every patch is judged
+    # against the same bar, rather than each patch re-normalising to its own
+    # background and finding "the reddest road pixel".
+    floor = None
+    if chroma_pct is not None:
+        flat = lab.reshape(-1, 3).astype(np.float32)
+        chroma = np.hypot(flat[:, 1] - 128.0, flat[:, 2] - 128.0)
+        floor = float(np.percentile(chroma, chroma_pct))
 
     gs = min(grid_size, h, w)
     ph, pw = max(1, h // gs), max(1, w // gs)
@@ -134,7 +154,14 @@ def _dominant_color_from_crop(crop_bgr: np.ndarray, grid_size: int = 4,
                         j * pw: min((j + 1) * pw, w)]
             if patch.size == 0:
                 continue
-            mean_px = np.mean(patch.reshape(-1, 3), axis=0)
+            px = patch.reshape(-1, 3).astype(np.float32)
+            if floor is not None:
+                pc = np.hypot(px[:, 1] - 128.0, px[:, 2] - 128.0)
+                keep = px[pc >= floor]
+                if keep.shape[0] == 0:
+                    continue
+                px = keep
+            mean_px = np.mean(px, axis=0)
             color = _classify_lab_patch(*mean_px, gt_vocabulary=gt_vocabulary)
             votes[color] = votes.get(color, 0) + 1
 
@@ -204,6 +231,9 @@ class SceneGraphBuilder:
     # Thresholds for spatial relations
     SPATIAL_THRESH = 0.10   # min normalised Δ to call left-of / above etc.
     DEPTH_THRESH   = 0.02   # min normalised Δ to call behind / in-front-of.
+    # Prefer image depth-order over heading projection for behind/in-front-of.
+    # See _depth_relation for the measurements behind this default.
+    PREFER_VIEWER_DEPTH = True
                             # Smaller than SPATIAL_THRESH on purpose: offsets
                             # along the view/travel axis are foreshortened, so
                             # the same physical gap spans far fewer pixels than
@@ -549,7 +579,21 @@ class SceneGraphBuilder:
         heading = n2.get("heading_vec") or (0.0, 0.0)
         hx, hy = float(heading[0]), float(heading[1])
 
-        if hx or hy:
+        # Which branch to trust.  The object-centric one is the principled
+        # route, but it needs a heading that actually points along the anchor's
+        # travel, and under a moving camera the image-space displacement a
+        # tracker sees is the object's motion PLUS the camera's.  Measured on
+        # rmot3's drone footage (exp9/exp10), the anchor's raw image motion
+        # agrees with true travel direction only 50% of the time (37% points the
+        # opposite way); subtracting the frame's median displacement to cancel
+        # ego-motion lifts that only to 63%.  End to end that branch scores 43.9%
+        # against 97.3% for the viewer-centric one, so preferring it whenever any
+        # heading exists picks the worse estimator -- and the better the anchor
+        # detection, the more often that happens.
+        #
+        # Set False to restore heading-first behaviour on footage where the
+        # camera is static, or where ego-motion is compensated upstream.
+        if (hx or hy) and not self.PREFER_VIEWER_DEPTH:
             hy_w = hy * aspect
             scale = math.hypot(hx, hy_w)
             if scale == 0:
@@ -562,12 +606,28 @@ class SceneGraphBuilder:
                 return "behind"
             return None
 
-        # Viewer-centric fallback: lower in the image == nearer the camera.
+        # Viewer-centric fallback.  Lower in the image is nearer the camera --
+        # but nearer is not "in front of".  "In front of the bus" means ahead of
+        # it along the direction of travel, and for any camera that follows the
+        # traffic (this dataset's drone, or a forward-facing vehicle camera) the
+        # object ahead is the one FURTHER from the camera, so it sits higher in
+        # the frame.  Reading nearer-as-in-front inverts the relation.
+        #
+        # Measured on rmot3 over 4588 GT target/confuser pairs, against a 3D
+        # ground truth that projects world offset onto the bus's own yaw
+        # (99.2% self-consistent): nearer-as-in-front scored 1.5% correct and
+        # 97.3% WRONG; this orientation scores 97.3% correct.
+        #
+        # This assumes the camera looks along the traffic's direction of travel.
+        # A camera facing oncoming traffic head-on would need the opposite sign,
+        # which image position alone cannot distinguish -- see _depth_relation's
+        # object-centric branch above, which is the principled route when a
+        # reliable heading is available.
         depth = dy * aspect
         if depth > self.DEPTH_THRESH:
-            return "in-front-of"
-        if depth < -self.DEPTH_THRESH:
             return "behind"
+        if depth < -self.DEPTH_THRESH:
+            return "in-front-of"
         return None
 
     def _motion_attrs(self, track_id: int) -> Dict[str, Any]:

@@ -211,7 +211,7 @@ class Worker:
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         t = self._transform(img)
         if str(self.device).startswith("cuda"):
-            t = t.cuda(non_blocking=True)
+            t = t.to(self.device, non_blocking=True)
         return t.half() if self.use_fp16 else t
 
     def _detect(self, frame_bgr: np.ndarray, tensor: torch.Tensor,

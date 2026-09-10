@@ -2,6 +2,7 @@ import numpy as np
 import torch.nn.functional as F
 
 from .kalman_filter import KalmanFilter
+from .gmc import GMC, apply_to_tracks
 from tracker import matching
 from .basetrack import BaseTrack, TrackState
 
@@ -149,8 +150,19 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+        # Camera motion compensation.  On by default: it is a no-op for a static
+        # camera (the estimate comes back as identity) and is what keeps ids
+        # alive under a moving one.  Disable with args.cmc = False.
+        self._gmc = GMC(downscale=getattr(args, "cmc_downscale", 2)) \
+            if getattr(args, "cmc", True) else None
 
-    def update(self, output_results, img_info, img_size):
+    def update(self, output_results, img_info, img_size, img=None):
+        """``img`` (BGR frame) enables camera motion compensation.
+
+        Without it the Kalman filter assumes a fixed image frame, which a moving
+        camera violates -- see tracker/gmc.py.  Passing the frame is optional so
+        every existing caller keeps working unchanged.
+        """
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
@@ -177,6 +189,15 @@ class BYTETracker(object):
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
+
+        # Camera motion compensation: move every existing track into this
+        # frame's coordinates before the Kalman step, so the filter only has to
+        # explain the object's own motion.
+        if img is not None and self._gmc is not None:
+            H = self._gmc.apply(img)
+            if not np.allclose(H, np.eye(2, 3)):
+                apply_to_tracks(self.tracked_stracks, H)
+                apply_to_tracks(self.lost_stracks, H)
 
         if len(dets) > 0:
             '''Detections'''

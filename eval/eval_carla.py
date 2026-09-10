@@ -290,6 +290,14 @@ def _run_on_device(device_str, scenario_items, args, tracker_kwargs,
     """
     gpu_tag = device_str.split(":")[-1] if "cuda" in device_str else "cpu"
 
+    # PyTorch's current CUDA device is per-thread and defaults to 0.  The
+    # detector's custom ms_deform_attn kernels launch on the *current* device
+    # rather than on the device its tensors live on, so a thread driving cuda:1
+    # without this launches them on cuda:0 against cuda:1 tensors and trips a
+    # device-side assert that poisons the context for every thread.
+    if device_str.startswith("cuda"):
+        torch.cuda.set_device(int(gpu_tag))
+
     dummy_gt_root = os.path.join(run_outdir, "_gt_stub")
     os.makedirs(os.path.join(dummy_gt_root, "gt"), exist_ok=True)
 
@@ -496,12 +504,15 @@ def main():
 
     # Scene graph
     ap.add_argument(
-        "--scene_graph", action="store_true", default=True,
+        "--scene_graph", action=argparse.BooleanOptionalAction, default=True,
         help="Build scene graphs and save JSONL to results/ alongside MOT output.",
     )
     ap.add_argument(
-        "--visualize_scene_graph", action="store_true", default=True,
-        help="Render per-frame scene graph PNGs to viz/<scenario>/ (implies --scene_graph).",
+        "--visualize_scene_graph", action=argparse.BooleanOptionalAction, default=True,
+        help="Render per-frame scene graph PNGs to viz/<scenario>/ (implies --scene_graph). "
+             "Rendering is CPU-bound and dominates wall time (~6 min/sequence vs well under "
+             "a minute for the GPU work), so --no-visualize_scene_graph is worth it when you "
+             "only need the metrics; the scene graph JSONL is written either way.",
     )
 
     args = ap.parse_args()

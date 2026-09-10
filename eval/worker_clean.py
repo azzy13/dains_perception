@@ -54,6 +54,11 @@ TRACKER_REGISTRY: Dict[str, Tuple[str, str]] = {
 # ============================
 # Utility Functions
 # ============================
+# Anchor overlay colour (BGR).  Blue, to read clearly against the green
+# emitted-track boxes and the red GT boxes.
+ANCHOR_BOX_COLOR = (255, 0, 0)
+
+
 def build_normalize_transform():
     """Build image normalization transform with max 800px short side."""
     def resize_if_needed(img):
@@ -962,7 +967,7 @@ class Worker:
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         tensor = self._transform(img)
         if str(self.device).startswith("cuda"):
-            tensor = tensor.cuda(non_blocking=True)
+            tensor = tensor.to(self.device, non_blocking=True)
         return tensor.half() if self.use_fp16 else tensor
 
     def predict_detections(self, frame_bgr: np.ndarray, tensor_image: Optional[torch.Tensor],
@@ -1083,11 +1088,20 @@ class Worker:
 
         return dets, assign_detection_roles(phrases, self.query)
 
-    def update_tracker(self, dets_xyxy: np.ndarray, orig_h: int, orig_w: int):
-        """Update tracker with detections."""
+    def update_tracker(self, dets_xyxy: np.ndarray, orig_h: int, orig_w: int,
+                       frame_bgr: Optional[np.ndarray] = None):
+        """Update tracker with detections.
+
+        ``frame_bgr`` is forwarded to trackers that support camera motion
+        compensation; those that do not simply never see it.
+        """
         if dets_xyxy.size == 0:
             dets_xyxy = np.empty((0, 5), dtype=np.float32)
-        return self.tracker.update(dets_xyxy, [orig_h, orig_w], [orig_h, orig_w])
+        try:
+            return self.tracker.update(dets_xyxy, [orig_h, orig_w], [orig_h, orig_w],
+                                       img=frame_bgr)
+        except TypeError:
+            return self.tracker.update(dets_xyxy, [orig_h, orig_w], [orig_h, orig_w])
 
     def update_tracker_clip(self, dets_xyxy: np.ndarray, frame_bgr: np.ndarray,
                            orig_h: int, orig_w: int):
@@ -1305,7 +1319,7 @@ class Worker:
                 if self.tracker_type in ("clip", "smartclip"):
                     tracks = self.update_tracker_clip(dets, img, orig_h, orig_w)
                 else:
-                    tracks = self.update_tracker(dets, orig_h, orig_w)
+                    tracks = self.update_tracker(dets, orig_h, orig_w, frame_bgr=img)
 
                 if show_detail:
                     print(f" → track={len(tracks)}", end="")
@@ -1386,17 +1400,26 @@ class Worker:
                             cv2.putText(vis_frame, f"ID:{t.track_id}", (x1, y1 - 5),
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-                    # Debug only: anchors, dotted and unlabelled (they have no
-                    # output identity).  Off unless debug_draw_anchors is set.
-                    if self.grounding_enabled and self.debug_draw_anchors:
-                        from query_grounding import ANCHOR_DEBUG_COLOR
+                    # Anchors, in blue and labelled "anchor" with no id: they are
+                    # scene-graph scaffolding, never written to the MOT output, so
+                    # giving them a track id in the overlay would imply they were
+                    # emitted.  Drawn whenever grounding is on -- seeing whether the
+                    # anchor was found is the first thing you check when a relation
+                    # scores oddly.  --debug_draw_anchors additionally dots them.
+                    if self.grounding_enabled:
                         for t in anchor_tracks(tracks, track_roles):
                             x, y, w, h = t.tlwh
-                            draw_dotted_rect(vis_frame, (x, y), (x + w, y + h),
-                                             ANCHOR_DEBUG_COLOR, thickness=2)
-                            cv2.putText(vis_frame, "anchor", (int(x), int(y) - 5),
+                            p1 = (int(x), int(y))
+                            p2 = (int(x + w), int(y + h))
+                            if self.debug_draw_anchors:
+                                draw_dotted_rect(vis_frame, (x, y), (x + w, y + h),
+                                                 ANCHOR_BOX_COLOR, thickness=2)
+                            else:
+                                cv2.rectangle(vis_frame, p1, p2, ANCHOR_BOX_COLOR, 2)
+                            cv2.putText(vis_frame, "anchor",
+                                        (p1[0], max(12, p1[1] - 6)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                        ANCHOR_DEBUG_COLOR, 1)
+                                        ANCHOR_BOX_COLOR, 2)
 
                     # Draw GT boxes if enabled
                     if self.show_gt_boxes:

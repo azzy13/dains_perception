@@ -110,6 +110,10 @@ HUE_NEIGHBORS: Dict[str, Tuple[str, ...]] = {
 #: score treats achromatic as uninformative rather than as evidence against.
 CHROMA_MIN = 18.0
 
+# Percentile of a crop's chroma distribution above which pixels are treated as
+# the object's own paint rather than its background.  See lab_stats().
+CHROMA_PIXEL_PCT = 85.0
+
 #: Absolute L* buckets, used when a frame has no peer detections to compare
 #: against. Perceptual units (0..100), not exposure-dependent 0..255 values.
 DARK_L_MAX = 32.0
@@ -168,8 +172,28 @@ def lab_stats(crop_rgb: np.ndarray) -> Tuple[float, float, float]:
     lab = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
     med = np.median(lab, axis=0)
     L = float(med[0]) * 100.0 / 255.0     # OpenCV packs L* into 0..255
-    a = float(med[1]) - 128.0
-    b = float(med[2]) - 128.0
+
+    # Chroma and hue are read off the crop's most chromatic pixels, not all of
+    # it.  A detection box is not a mask: measured on rmot3, 80-90% of a target
+    # box is road, sky and shadow, so a whole-crop median chroma reports the
+    # background.  That is what made the chromatic branch of score_votes
+    # abstain everywhere -- median chroma 6.3 for a red car against
+    # CHROMA_MIN 18, so 0.0% of red cars ever reached it (the same 0.0% this
+    # module's own notes record on Refer-KITTI).  Measured over the car's own
+    # pixels the red cars sit at 38.6 (99.3% clear CHROMA_MIN) while the white
+    # bus stays at 6.3 (5.3%), so the threshold separates rather than abstains.
+    #
+    # L* deliberately keeps the whole-crop median: peer_relative_scores ranks
+    # lightness across a frame's detections, and that ranking wants the object's
+    # overall lightness, not its most colourful corner.
+    ch = np.hypot(lab[:, 1] - 128.0, lab[:, 2] - 128.0)
+    sel = lab
+    if lab.shape[0] >= 16:
+        keep = lab[ch >= np.percentile(ch, CHROMA_PIXEL_PCT)]
+        if keep.shape[0]:
+            sel = keep
+    a = float(np.median(sel[:, 1])) - 128.0
+    b = float(np.median(sel[:, 2])) - 128.0
     chroma = float(np.hypot(a, b))
     hue = float(np.degrees(np.arctan2(b, a)) % 360.0)
     return L, chroma, hue

@@ -384,7 +384,7 @@ class Worker:
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         tensor = self._transform(img)
         if str(self.device).startswith("cuda"):
-            tensor = tensor.cuda(non_blocking=True)
+            tensor = tensor.to(self.device, non_blocking=True)
         return tensor.half() if self.use_fp16 else tensor
 
     def predict_detections(self, frame_bgr: np.ndarray,
